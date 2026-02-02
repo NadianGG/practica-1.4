@@ -13,6 +13,7 @@ DEFAULT_TIMEOUT = 2  # in secs
 
 
 @pytest.mark.api
+@pytest.mark.readonly
 class TestApi(unittest.TestCase):
     
     def setUp(self):
@@ -169,7 +170,7 @@ class TestApi(unittest.TestCase):
             response.status_code, 200, "Error en la petición API a {url}"
         )
         print('End - integration test Update TODO')
-        
+
     def test_api_deletetodo(self):
         print('---------------------------------------')
         print('Starting - integration test Delete TODO')
