@@ -13,7 +13,6 @@ DEFAULT_TIMEOUT = 2  # in secs
 
 
 @pytest.mark.api
-@pytest.mark.readonly
 class TestApi(unittest.TestCase):
     
     def setUp(self):
