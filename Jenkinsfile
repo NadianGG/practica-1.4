@@ -114,27 +114,35 @@ pipeline {
         }
 
         stage('Promote') {
-            steps {
-                withCredentials([string(credentialsId: 'GITHUB_TOKEN', variable: 'GITHUB_TOKEN')]) {
-                sh '''
-                    git config user.name "Jenkins"
-                    git config user.email "jenkins@ci.local"
-
-                    # Limpieza de archivos externos (config)
-                    rm -f samconfig.toml || true
-                    rm -rf config-repo || true
-
-                    git fetch origin
-                    git checkout master
-                    git merge origin/develop --no-ff -m "Release desde Jenkins"
-
-                    # mantener Jenkinsfile del master
-                    git checkout origin/master -- Jenkinsfile
-
-                    git push https://$GITHUB_TOKEN@github.com/NadianGG/practica-1.4.git master
-                '''
-                }
+          steps {
+            withCredentials([string(credentialsId: 'GITHUB_TOKEN', variable: 'GITHUB_TOKEN')]) {
+              sh '''
+                git config user.name "Jenkins"
+                git config user.email "jenkins@ci.local"
+        
+                rm -f samconfig.toml || true
+                rm -rf config-repo || true
+        
+                git fetch origin
+                git checkout master
+        
+                # Intentar merge. Si falla por conflicto (Jenkinsfile), lo resolvemos quedándonos con el de master
+                if ! git merge origin/develop --no-ff -m "Release desde Jenkins"; then
+                  echo "Merge con conflictos. Forzando Jenkinsfile de master..."
+                  git checkout --ours Jenkinsfile
+                  git add Jenkinsfile
+                  git commit -m "Resolve Jenkinsfile conflict keeping master version"
+                fi
+        
+                # Seguridad extra: restaurar exactamente el Jenkinsfile que estaba en origin/master
+                git checkout origin/master -- Jenkinsfile
+                git add Jenkinsfile
+                git commit -m "Keep master Jenkinsfile" || true
+        
+                git push https://$GITHUB_TOKEN@github.com/NadianGG/practica-1.4.git master
+              '''
             }
+          }
         }
     }
 
