@@ -1,0 +1,181 @@
+pipeline {
+    agent any
+
+    environment {
+        REPO_URL = 'https://github.com/NadianGG/practica-1.4.git'
+        BRANCH = 'develop'
+        STAGING_STACK_NAME = 'staging-todo-list-aws'
+        REGION = 'us-east-1'
+    }
+
+    stages {
+
+        stage('Get Code') {
+            steps {
+                // Evidencia de nodo (enunciado)
+                sh '''
+                  echo "=== Get Code: nodo y usuario ==="
+                  whoami
+                  hostname
+                '''
+
+                // Clonamos el repo en el nodo maestro
+                checkout([$class: 'GitSCM',
+                    branches: [[name: "*/${BRANCH}"]],
+                    userRemoteConfigs: [[url: "${REPO_URL}"]]
+                ])
+
+                // Stash del código para pasarlo a los nodos
+                stash name: 'source_code', includes: '**/*'
+            }
+        }
+
+        stage('Static Test') {
+            agent { label 'static' }
+            steps {
+                // Evidencia de nodo (enunciado)
+                sh '''
+                  echo "=== Static Test: nodo y usuario ==="
+                  whoami
+                  hostname
+                '''
+
+                // Recuperamos el código en el nodo static
+                unstash 'source_code'
+
+                sh '''
+                    cd src
+                    python3 -m flake8 . || true
+                    bandit -r . || true
+                '''
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                // Evidencia de nodo (enunciado)
+                sh '''
+                  echo "=== Deploy: nodo y usuario ==="
+                  whoami
+                  hostname
+                '''
+
+                // Recuperamos el código en el nodo maestro (por si lo necesitamos)
+                unstash 'source_code'
+
+                sh '''
+                    sam build
+                    sam validate --region ${REGION}
+                    sam deploy \
+                        --stack-name ${STAGING_STACK_NAME} \
+                        --region ${REGION} \
+                        --s3-bucket aws-sam-cli-managed-default-samclisourcebucket-3csk4ycbpsfd \
+                        --no-confirm-changeset \
+                        --capabilities CAPABILITY_IAM \
+                        --no-fail-on-empty-changeset
+                '''
+
+                script {
+                    def url = sh(
+                        script: """
+                        aws cloudformation describe-stacks \
+                            --stack-name ${STAGING_STACK_NAME} \
+                            --query "Stacks[0].Outputs[?OutputKey=='BaseUrlApi'].OutputValue" \
+                            --output text
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    writeFile file: 'base_url.txt', text: url
+                }
+
+                stash name: 'api_url', includes: 'base_url.txt'
+            }
+        }
+
+        stage('Rest Test') {
+            agent { label 'rest' }
+            steps {
+                // Evidencia de nodo (enunciado)
+                sh '''
+                  echo "=== Rest Test: nodo y usuario ==="
+                  whoami
+                  hostname
+                '''
+
+                // Recuperamos el código y el archivo con la URL de la API
+                unstash 'source_code'
+                unstash 'api_url'
+
+                sh '''
+                    export BASE_URL=$(cat base_url.txt)
+                    echo "Endpoint: $BASE_URL"
+
+                    # Ejecutamos pytest y generamos reporte JUnit para Jenkins
+                    pytest test/integration/todoApiTest.py \
+                        --maxfail=1 \
+                        --disable-warnings \
+                        --junitxml=pytest-report.xml
+                '''
+            }
+            post {
+                always {
+                    // Publicar resultados en Jenkins (aparecerá "Test Result")
+                    junit testResults: 'pytest-report.xml', allowEmptyResults: true
+
+                    // Guardar el XML como artefacto (opcional pero útil)
+                    archiveArtifacts artifacts: 'pytest-report.xml', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Promote') {
+            steps {
+                // Evidencia de nodo (enunciado)
+                sh '''
+                  echo "=== Promote: nodo y usuario ==="
+                  whoami
+                  hostname
+                '''
+
+                withCredentials([string(credentialsId: 'GITHUB_TOKEN', variable: 'GITHUB_TOKEN')]) {
+                    sh '''
+                        set -e
+
+                        git config user.name "Jenkins"
+                        git config user.email "jenkins@ci.local"
+
+                        git fetch origin --prune
+
+                        # 1) Asegurar master local = origin/master (evita diverged/non-fast-forward)
+                        git checkout -B master origin/master
+
+                        # 2) Merge desde develop (o la rama definida en BRANCH)
+                        git merge --no-ff origin/${BRANCH} -m "Release desde Jenkins"
+
+                        # 3) Conservar el Jenkinsfile de master remoto
+                        git checkout origin/master -- Jenkinsfile
+
+                        # 4) Si hubo cambios al restaurar Jenkinsfile, los comiteamos
+                        if ! git diff --quiet; then
+                          git add Jenkinsfile
+                          git commit -m "Mantener Jenkinsfile de master"
+                        fi
+
+                        # 5) Push a master
+                        git push https://$GITHUB_TOKEN@github.com/NadianGG/practica-1.4.git master
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline CI completado con éxito.'
+        }
+        failure {
+            echo 'Pipeline CI falló.'
+        }
+    }
+}
