@@ -1,0 +1,102 @@
+pipeline {
+    agent any
+
+    environment {
+        REPO_URL = 'https://github.com/NadianGG/practica-1.4.git'
+        MASTER_BRANCH = 'master'
+        PROD_STACK_NAME = 'todo-list-aws-production'
+        PROD_BUCKET = 'aws-sam-prod-todo-list'
+        REGION = 'us-east-1'
+    }
+
+    stages {
+
+        stage('Get Code - Production') {
+            steps {
+                echo "Ejecutando en agente: ${NODE_NAME}"
+
+                checkout([$class: 'GitSCM',
+                    branches: [[name: "*/${MASTER_BRANCH}"]],
+                    userRemoteConfigs: [[url: "${REPO_URL}"]]
+                ])
+
+                stash name: 'source_code', includes: '**/*'
+            }
+        }
+
+        stage('Build & Deploy - Production') {
+            steps {
+                echo "Ejecutando en agente: ${NODE_NAME}"
+
+                unstash 'source_code'
+
+                sh '''
+                    sam build
+                    sam deploy \
+                        --stack-name ${PROD_STACK_NAME} \
+                        --s3-bucket ${PROD_BUCKET} \
+                        --region ${REGION} \
+                        --capabilities CAPABILITY_IAM \
+                        --parameter-overrides Stage="production" \
+                        --no-confirm-changeset \
+                        --no-fail-on-empty-changeset
+                '''
+
+                script {
+                    def url = sh(
+                        script: """
+                        aws cloudformation describe-stacks \
+                            --stack-name ${PROD_STACK_NAME} \
+                            --query "Stacks[0].Outputs[?OutputKey=='BaseUrlApi'].OutputValue" \
+                            --output text
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    writeFile file: 'base_url.txt', text: url
+                }
+
+                stash name: 'api_url', includes: 'base_url.txt'
+            }
+        }
+
+        stage('Rest Test - Production') {
+            agent { label 'rest' }
+            steps {
+                echo "Ejecutando en agente: ${NODE_NAME}"
+
+                unstash 'source_code'
+                unstash 'api_url'
+
+                sh '''
+                    export BASE_URL=$(cat base_url.txt)
+                    echo "Endpoint: $BASE_URL"
+
+                    pytest test/integration/todoApiTest.py \
+                        --maxfail=1 \
+                        --disable-warnings \
+                        -m "api and readonly" \
+                        --junitxml=pytest-report.xml
+                '''
+            }
+            post {
+                always {
+                    // Publica resultados de Pytest en Jenkins (Test Result)
+                    junit testResults: 'pytest-report.xml', allowEmptyResults: true
+
+                    // Guarda el reporte como artefacto descargable (opcional)
+                    archiveArtifacts artifacts: 'pytest-report.xml', allowEmptyArchive: true
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline CD completado con éxito.'
+        }
+        failure {
+            echo 'Pipeline CD falló.'
+        }
+    }
+}
